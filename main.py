@@ -1,4 +1,15 @@
-import os, json, discord, asyncio, random, aiohttp
+import sys
+import types
+
+# Patch to skip discord.voice_client import (fix missing audioop error on Render)
+sys.modules['discord.voice_client'] = types.ModuleType('discord.voice_client')
+
+import os
+import json
+import discord
+import asyncio
+import random
+import aiohttp
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from keep_alive import keep_alive
