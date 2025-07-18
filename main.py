@@ -1,190 +1,109 @@
 import os
-import re
-import random
-import asyncio
-import threading
-from flask import Flask
 import discord
 from discord.ext import commands, tasks
-from discord.ui import View, Button, Select
-import aiohttp
-from bs4 import BeautifulSoup
+from discord.ui import Button, View
+from keep_alive import keep_alive
+import random
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
-PORT = int(os.getenv("PORT", 8080))
 
-app = Flask("")
+intents = discord.Intents.all()
+bot = commands.Bot(command_prefix="/", intents=intents)
 
-@app.route("/")
-def home():
-    return "Bot is alive!"
+# Keep alive for Render 24/7
+keep_alive()
 
-def run_flask():
-    app.run(host="0.0.0.0", port=PORT)
+@bot.event
+async def on_ready():
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="PFPs with Nexus"))
+    autopost.start()
+    print(f"✅ Logged in as {bot.user}")
 
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+# Channel ID -> List of tags
+channel_tags = {}
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/116.0 Safari/537.36"
-}
-
-# Tags for selection
-TAGS = [
-    "anime", "egirl", "eboy", "faceless", "cute", "goth", "emo",
-    "pixel", "vaporwave", "fantasy", "cyber", "matching", "banners",
-    "kpop", "drip", "body", "city", "aesthetic", "plushies", "soft", "random"
+# All tag options
+all_tags = [
+    "anime", "egirl", "eboy", "faceless", "cute", "goth", "emo", "pixel", "vaporwave", "fantasy",
+    "cyber", "matching", "banners", "kpop", "drip", "city", "aesthetic", "plushies", "soft",
+    "body", "thighs", "mirror", "boobs", "ass", "arch", "panties", "gif", "sets", "random"
 ]
 
-async def google_search_images(query, num=5):
+# Fetch PFPs from Google Images using Custom Search API
+def fetch_google_images(query, amount=5):
     url = "https://www.googleapis.com/customsearch/v1"
     params = {
         "key": GOOGLE_API_KEY,
         "cx": GOOGLE_CSE_ID,
-        "searchType": "image",
         "q": query,
-        "num": num,
-        "safe": "high"
+        "searchType": "image",
+        "num": amount,
+        "safe": "off"
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params) as resp:
-            if resp.status != 200:
-                return []
-            data = await resp.json()
-            return [item["link"] for item in data.get("items", [])]
+    res = requests.get(url, params=params)
+    if res.status_code == 200:
+        return [item["link"] for item in res.json().get("items", [])]
+    return []
 
-async def pinterest_scrape_images(query, num=5):
-    search_url = f"https://www.pinterest.com/search/pins/?q={query.replace(' ', '%20')}"
-    images = []
+# Auto-post every 60 seconds per configured channel
+@tasks.loop(seconds=60)
+async def autopost():
+    for channel_id, tags in channel_tags.items():
+        channel = bot.get_channel(channel_id)
+        if channel:
+            selected_tag = random.choice(tags) if "random" in tags else tags[0]
+            images = fetch_google_images(selected_tag)
+            for url in images:
+                await channel.send(url)
 
-    async with aiohttp.ClientSession(headers=HEADERS) as session:
-        async with session.get(search_url) as resp:
-            if resp.status != 200:
-                return []
-            text = await resp.text()
-            soup = BeautifulSoup(text, 'html.parser')
-            img_tags = soup.find_all('img', src=True)
-            for img in img_tags:
-                src = img['src']
-                if re.search(r'https://i.pinimg.com/', src):
-                    images.append(src)
-                if len(images) >= num:
-                    break
-    return images
+# Slash-style command using /start (via prefix for now)
+@bot.command()
+async def start(ctx):
+    class TagSelector(View):
+        def __init__(self):
+            super().__init__(timeout=None)
+            self.selected = set()
+            rows = [[], [], [], []]
+            for i, tag in enumerate(all_tags):
+                button = Button(label=tag, style=discord.ButtonStyle.secondary, custom_id=tag, row=i // 8)
+                button.callback = self.toggle
+                self.add_item(button)
 
-class TagSelect(Select):
-    def __init__(self, pfp_cog, channel_id):
-        options = [discord.SelectOption(label=tag, description=f"Add tag: {tag}") for tag in TAGS]
-        super().__init__(placeholder="Select tags to add...", min_values=1, max_values=len(options), options=options)
-        self.pfp_cog = pfp_cog
-        self.channel_id = channel_id
+            done_btn = Button(label="✅ Done", style=discord.ButtonStyle.success, row=3)
+            done_btn.callback = self.finish
+            self.add_item(done_btn)
 
-    async def callback(self, interaction: discord.Interaction):
-        selected = self.values
-        added = []
-        for tag in selected:
-            if tag not in self.pfp_cog.active_channels.get(self.channel_id, []):
-                self.pfp_cog.active_channels.setdefault(self.channel_id, []).append(tag)
-                added.append(tag)
-        await interaction.response.send_message(
-            f"✅ Added tags {', '.join(added)} for this channel. Bot will post images for all tags.", ephemeral=True
-        )
+        async def toggle(self, interaction):
+            tag = interaction.data["custom_id"]
+            if tag in self.selected:
+                self.selected.remove(tag)
+            else:
+                self.selected.add(tag)
+            await interaction.response.defer()
 
-class ClearButton(Button):
-    def __init__(self, pfp_cog, channel_id):
-        super().__init__(label="Clear Tags", style=discord.ButtonStyle.danger)
-        self.pfp_cog = pfp_cog
-        self.channel_id = channel_id
+        async def finish(self, interaction):
+            if not self.selected:
+                await interaction.response.send_message("❌ You need to select at least one tag.", ephemeral=True)
+                return
+            channel_tags[interaction.channel.id] = list(self.selected)
+            await interaction.response.send_message(f"✅ Started auto-posting in this channel for: {', '.join(self.selected)}", ephemeral=True)
+            self.stop()
 
-    async def callback(self, interaction: discord.Interaction):
-        if self.channel_id in self.pfp_cog.active_channels:
-            self.pfp_cog.active_channels.pop(self.channel_id)
-            await interaction.response.send_message("🛑 Cleared all tags for this channel.", ephemeral=True)
-        else:
-            await interaction.response.send_message("⚠️ No active tags to clear.", ephemeral=True)
+    await ctx.send("🎯 Select PFP tags for this channel:", view=TagSelector())
 
-class ShowTagsButton(Button):
-    def __init__(self, pfp_cog, channel_id):
-        super().__init__(label="Show Tags", style=discord.ButtonStyle.secondary)
-        self.pfp_cog = pfp_cog
-        self.channel_id = channel_id
+# Command to stop autopost in current channel
+@bot.command()
+async def stop(ctx):
+    if ctx.channel.id in channel_tags:
+        del channel_tags[ctx.channel.id]
+        await ctx.send("🛑 Auto-posting disabled in this channel.")
+    else:
+        await ctx.send("⚠️ This channel wasn't set up for auto-posting.")
 
-    async def callback(self, interaction: discord.Interaction):
-        tags = self.pfp_cog.active_channels.get(self.channel_id, [])
-        if tags:
-            await interaction.response.send_message(f"🔖 Active tags for this channel: {', '.join(tags)}", ephemeral=True)
-        else:
-            await interaction.response.send_message("⚠️ No active tags for this channel.", ephemeral=True)
-
-class TagView(View):
-    def __init__(self, pfp_cog, channel_id):
-        super().__init__(timeout=None)
-        self.add_item(TagSelect(pfp_cog, channel_id))
-        self.add_item(ClearButton(pfp_cog, channel_id))
-        self.add_item(ShowTagsButton(pfp_cog, channel_id))
-
-class PfpBot(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-        # Dict: channel_id -> list of tags
-        self.active_channels = {}
-        self.posting_loop.start()
-
-    @commands.command(name="setuptags")
-    async def setuptags(self, ctx):
-        """Posts the tag selection UI in the channel"""
-        view = TagView(self, ctx.channel.id)
-        await ctx.send("Select tags to start posting PFP images:", view=view)
-
-    @tasks.loop(minutes=1)
-    async def posting_loop(self):
-        for channel_id, tags in list(self.active_channels.items()):
-            channel = self.bot.get_channel(channel_id)
-            if not channel:
-                self.active_channels.pop(channel_id)
-                continue
-            for tag in tags:
-                images = []
-                # Alternate sources for variety
-                source = random.choice(["google", "pinterest"])
-                if source == "google":
-                    images = await google_search_images(tag, num=3)
-                else:
-                    images = await pinterest_scrape_images(tag, num=3)
-                for img_url in images:
-                    embed = discord.Embed()
-                    embed.set_image(url=img_url)
-                    try:
-                        await channel.send(embed=embed)
-                    except Exception:
-                        pass
-
-    @posting_loop.before_loop
-    async def before_posting(self):
-        await self.bot.wait_until_ready()
-
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user} ({bot.user.id})")
-    # Sync commands if any slash commands added later
-    try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} commands")
-    except Exception as e:
-        print(f"Command sync failed: {e}")
-
-    # Set custom status: Playing with Nexus
-    await bot.change_presence(activity=discord.Game(name="Playing with Nexus"))
-
-def run_bot():
-    bot.add_cog(PfpBot(bot))
-    bot.run(TOKEN)
-
-if __name__ == "__main__":
-    threading.Thread(target=run_flask).start()  # Run Flask keep-alive server in background
-    run_bot()
+bot.run(TOKEN)
