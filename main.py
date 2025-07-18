@@ -16,26 +16,26 @@ GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="/", intents=intents)
 
-# Keep alive for Render 24/7
+# Keep the bot alive on Render
 keep_alive()
 
 @bot.event
 async def on_ready():
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="PFPs with Nexus"))
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="PFPs for Nexus ❤️"))
     autopost.start()
     print(f"✅ Logged in as {bot.user}")
 
-# Channel ID -> List of tags
+# Channel ID to list of selected tags
 channel_tags = {}
 
-# All tag options
+# All available tags (NSFW all grouped as "body")
 all_tags = [
     "anime", "egirl", "eboy", "faceless", "cute", "goth", "emo", "pixel", "vaporwave", "fantasy",
     "cyber", "matching", "banners", "kpop", "drip", "city", "aesthetic", "plushies", "soft",
-    "body", "thighs", "mirror", "boobs", "ass", "arch", "panties", "gif", "sets", "random"
+    "body", "gif", "sets", "random"
 ]
 
-# Fetch PFPs from Google Images using Custom Search API
+# Fetch images from Google Custom Search API
 def fetch_google_images(query, amount=5):
     url = "https://www.googleapis.com/customsearch/v1"
     params = {
@@ -44,42 +44,42 @@ def fetch_google_images(query, amount=5):
         "q": query,
         "searchType": "image",
         "num": amount,
-        "safe": "off"
+        "safe": "off"  # "off" to allow NSFW for 'body' tag, be careful!
     }
     res = requests.get(url, params=params)
     if res.status_code == 200:
         return [item["link"] for item in res.json().get("items", [])]
     return []
 
-# Auto-post every 60 seconds per configured channel
+# Auto-post images every 60 seconds per channel
 @tasks.loop(seconds=60)
 async def autopost():
     for channel_id, tags in channel_tags.items():
         channel = bot.get_channel(channel_id)
-        if channel:
-            selected_tag = random.choice(tags) if "random" in tags else tags[0]
-            images = fetch_google_images(selected_tag)
-            for url in images:
-                await channel.send(url)
+        if not channel:
+            continue
+        # Pick random tag if "random" selected; else use first tag
+        tag = random.choice(tags) if "random" in tags else tags[0]
+        images = fetch_google_images(tag)
+        for img_url in images:
+            await channel.send(img_url)
 
-# Slash-style command using /start (via prefix for now)
+# /start command to select tags with buttons
 @bot.command()
 async def start(ctx):
     class TagSelector(View):
         def __init__(self):
             super().__init__(timeout=None)
             self.selected = set()
-            rows = [[], [], [], []]
-            for i, tag in enumerate(all_tags):
-                button = Button(label=tag, style=discord.ButtonStyle.secondary, custom_id=tag, row=i // 8)
+            for tag in all_tags:
+                button = Button(label=tag, style=discord.ButtonStyle.secondary, custom_id=tag)
                 button.callback = self.toggle
                 self.add_item(button)
-
-            done_btn = Button(label="✅ Done", style=discord.ButtonStyle.success, row=3)
+            done_btn = Button(label="✅ Done", style=discord.ButtonStyle.success)
             done_btn.callback = self.finish
             self.add_item(done_btn)
 
-        async def toggle(self, interaction):
+        async def toggle(self, interaction: discord.Interaction):
             tag = interaction.data["custom_id"]
             if tag in self.selected:
                 self.selected.remove(tag)
@@ -87,23 +87,23 @@ async def start(ctx):
                 self.selected.add(tag)
             await interaction.response.defer()
 
-        async def finish(self, interaction):
+        async def finish(self, interaction: discord.Interaction):
             if not self.selected:
-                await interaction.response.send_message("❌ You need to select at least one tag.", ephemeral=True)
+                await interaction.response.send_message("❌ Select at least one tag before finishing.", ephemeral=True)
                 return
             channel_tags[interaction.channel.id] = list(self.selected)
-            await interaction.response.send_message(f"✅ Started auto-posting in this channel for: {', '.join(self.selected)}", ephemeral=True)
+            await interaction.response.send_message(f"✅ Auto-post started with tags: {', '.join(self.selected)}", ephemeral=True)
             self.stop()
 
-    await ctx.send("🎯 Select PFP tags for this channel:", view=TagSelector())
+    await ctx.send("🎯 Select your PFP tags for this channel:", view=TagSelector())
 
-# Command to stop autopost in current channel
+# /stop command to disable autoposting in channel
 @bot.command()
 async def stop(ctx):
     if ctx.channel.id in channel_tags:
         del channel_tags[ctx.channel.id]
-        await ctx.send("🛑 Auto-posting disabled in this channel.")
+        await ctx.send("🛑 Auto-posting stopped in this channel.")
     else:
-        await ctx.send("⚠️ This channel wasn't set up for auto-posting.")
+        await ctx.send("⚠️ This channel wasn’t set up for auto-posting.")
 
 bot.run(TOKEN)
