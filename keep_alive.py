@@ -1,11 +1,26 @@
-from flask import Flask
-from threading import Thread
+# keep_alive.py
 
-app = Flask(__name__)
+from aiohttp import web
+import os
+import asyncio
 
-@app.route('/')
-def home():
-    return "Bot is alive!"
+async def handle(request):
+    return web.Response(text="Bot is alive!")
 
-def keep_alive():
-    Thread(target=lambda: app.run(host='0.0.0.0', port=8080)).start()
+async def run():
+    app = web.Application()
+    app.add_routes([web.get('/', handle)])
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+
+    # Keep running forever
+    while True:
+        await asyncio.sleep(3600)
+
+# To run this keep alive server, use:
+# import keep_alive
+# asyncio.create_task(keep_alive.run())
